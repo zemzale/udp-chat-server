@@ -1,66 +1,35 @@
-use std::net::{UdpSocket, SocketAddr};
+use std::{net::SocketAddr, sync::Arc, io};
+use tokio::{net::UdpSocket, sync::mpsc};
 
 
-
-fn main() -> ! {
+#[tokio::main]
+async fn main() -> io::Result<()> {
     let connection_uri = "127.0.0.1:7878";
-    let socket = UdpSocket::bind(connection_uri).unwrap();
-    let mut users: Vec<User> = Vec::new();
+    let socket = UdpSocket::bind(connection_uri).await?;
+    let r = Arc::new(socket);
+    let s = r.clone();
+    let (tx, mut rx) = mpsc::channel::<RawMessage>(1_000);
 
-    println!("listening to connections at {}", connection_uri);
-
-    loop {
-        let mut buf = [0; 1024];
-        let (read_bytes, remote_addr) = socket.recv_from(&mut buf).unwrap();
-        let raw_messge = RawMessage::new(remote_addr, buf, read_bytes);
-
-        match MessageType::new(raw_messge, &mut users) {
-            MessageType::Login(addr, user_name) =>  {
-                println!("User from {}, logged in with name {}", addr, user_name);
-                users.push(User::new(addr, users.len().try_into().unwrap(), user_name));
-            },
-            MessageType::Color(from_user, message) => {
-                let new_color = match message.first() {
-                    Some(color) => Some(*color),
-                    None => Some(0),
-                };
-
-                let mut new_user = User::new(from_user.addr, from_user.id, from_user.name.unwrap());
-                new_user.color = new_color;
-                users[from_user.id] = new_user;
-                println!("user set color to {}", new_color.unwrap());
-            },
-            MessageType::Text(from_user, message) => {
-                println!("we got text message");
-                let return_msg = Response::new(ResponseType::Text, from_user.to_owned(), message);
-                let b = return_msg.buf();
-                let buf = b.as_slice();
-
-                for user in &users {
-                    if user.id == from_user.id {
-                        continue;
-                    }
-                    socket.send_to(buf, user.addr).unwrap();
-                }
-            },
-            MessageType::UserQuery(from_user, user) => {
-                println!("we got user query message");
-                let return_msg = Response::new(ResponseType::UserName, from_user.to_owned(), user.name.unwrap().into_bytes());
-                let b = return_msg.buf();
-                let buf = b.as_slice();
-
-                socket.send_to(buf, from_user.addr).unwrap();
-
-            },
-            MessageType::Unknown => println!("we got unknown"),
+    tokio::spawn(async move {
+        let mut users: Vec<User> = Vec::new();
+        while let Some(raw_message) = rx.recv().await {
+            users = handle_message(&s, users, raw_message).await.unwrap();
         }
+    });
 
-        println!();
+
+    let mut buf = [0; 1024];
+    loop {
+        let (read_bytes, remote_addr) = r.recv_from(&mut buf).await?;
+        println!("{:?} bytes recieved from {:?}", read_bytes, remote_addr);
+        let raw_messge = RawMessage::new(remote_addr, buf, read_bytes);
+        tx.send(raw_messge).await.unwrap();
     }
 }
 
+
 #[derive(Eq, Hash, PartialEq, Clone)]
-struct User  {
+struct User {
     addr: SocketAddr,
     id: usize,
     name: Option<String>,
@@ -69,27 +38,34 @@ struct User  {
 
 impl User {
     fn new(addr: SocketAddr, id: usize, name: String) -> User {
-        return User { addr, id, name: Some(name), color: None };
+        return User {
+            addr,
+            id,
+            name: Some(name),
+            color: None,
+        };
     }
 }
 
+#[derive(Debug)]
 struct RawMessage {
     from: SocketAddr,
     content: Vec<u8>,
 }
 
 impl RawMessage {
-    fn new(from: SocketAddr, content: [u8; 1024], read_bytes: usize) -> Self { 
-        Self { from, content: content[..read_bytes].to_vec() } 
+    fn new(from: SocketAddr, content: [u8; 1024], read_bytes: usize) -> Self {
+        Self {
+            from,
+            content: content[..read_bytes].to_vec(),
+        }
     }
-
 }
 
 enum ResponseType {
     Text,
     UserName,
 }
-
 
 impl From<u8> for ResponseType {
     fn from(v: u8) -> Self {
@@ -118,7 +94,12 @@ struct Response {
 
 impl Response {
     fn new(response_type: ResponseType, user: User, message: Vec<u8>) -> Self {
-        Response { response_type, user_id: user.id as u8, color: user.color.unwrap_or(0), text: message }
+        Response {
+            response_type,
+            user_id: user.id as u8,
+            color: user.color.unwrap_or(0),
+            text: message,
+        }
     }
 
     fn buf(self: Self) -> Vec<u8> {
@@ -132,10 +113,15 @@ impl From<Vec<u8>> for Response {
     fn from(data: Vec<u8>) -> Self {
         let response_type = ResponseType::from(data[0]);
         let user_id: u8 = data[1];
-        let color = data[2]; 
+        let color = data[2];
         let text = &data[2..];
 
-        return Self { response_type, user_id, color, text: text.to_vec() }
+        return Self {
+            response_type,
+            user_id,
+            color,
+            text: text.to_vec(),
+        };
     }
 }
 
@@ -148,23 +134,25 @@ enum MessageType {
 }
 
 impl MessageType {
-    fn new(message: RawMessage, users:&mut Vec<User>) -> Self {
+    fn new(message: RawMessage, users: &mut Vec<User>) -> Self {
         let msg_type = match message.content.first() {
             Some(t) => t,
             None => return MessageType::Unknown,
         };
-
         match msg_type {
             1u8 => {
-                return MessageType::Login(message.from, String::from_utf8(message.content).unwrap());
-            },
+                return MessageType::Login(
+                    message.from,
+                    String::from_utf8(message.content).unwrap(),
+                );
+            }
             2u8 => {
                 let user = match find_user_by_addr(message.from, users.to_vec()) {
                     Some(user) => user,
                     None => return MessageType::Unknown,
                 };
                 return MessageType::Color(user.to_owned(), message.content);
-            },
+            }
             3u8 => {
                 let user = match find_user_by_addr(message.from, users.to_vec()) {
                     Some(user) => user,
@@ -181,17 +169,17 @@ impl MessageType {
                     None => return MessageType::Unknown,
                 };
                 return MessageType::UserQuery(user.to_owned(), query_user);
-            },
+            }
             4u8 => {
                 let user = match find_user_by_addr(message.from, users.to_vec()) {
                     Some(user) => user,
                     None => return MessageType::Unknown,
                 };
                 return MessageType::Text(user.to_owned(), message.content);
-            },
+            }
             _ => {
                 return MessageType::Unknown;
-            },
+            }
         }
     }
 }
@@ -212,4 +200,54 @@ fn find_user_by_id(id: usize, users: Vec<User>) -> Option<User> {
         }
     }
     return None;
+}
+
+async fn handle_message(socket: &UdpSocket, mut users: Vec<User>, raw_messge: RawMessage) -> io::Result<Vec<User>> {
+    match MessageType::new(raw_messge, &mut users) {
+        MessageType::Login(addr, user_name) => {
+            println!("User from {}, logged in with name {}", addr, user_name);
+            users.push(User::new(addr, users.len().try_into().unwrap(), user_name));
+            return Ok(users);
+        }
+        MessageType::Color(from_user, message) => {
+            let new_color = match message.first() {
+                Some(color) => Some(*color),
+                None => Some(0),
+            };
+
+            let mut new_user = User::new(from_user.addr, from_user.id, from_user.name.unwrap());
+            new_user.color = new_color;
+            users[from_user.id] = new_user;
+            println!("user set color to {}", new_color.unwrap());
+            return Ok(users);
+        }
+        MessageType::Text(from_user, message) => {
+            println!("we got text message");
+            let return_msg = Response::new(ResponseType::Text, from_user.to_owned(), message);
+            let b = return_msg.buf();
+            let buf = b.as_slice();
+
+            for user in &users {
+                if user.id == from_user.id {
+                    continue;
+                }
+                socket.send_to(buf, user.addr).await?;
+            }
+            return Ok(users);
+        }
+        MessageType::UserQuery(from_user, user) => {
+            println!("we got user query message");
+            let return_msg = Response::new(
+                ResponseType::UserName,
+                from_user.to_owned(),
+                user.name.unwrap().into_bytes(),
+            );
+            let b = return_msg.buf();
+            let buf = b.as_slice();
+
+            socket.send_to(buf, from_user.addr).await?;
+            return Ok(users);
+        }
+        MessageType::Unknown => Ok(users),
+    }
 }
