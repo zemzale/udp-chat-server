@@ -13,15 +13,16 @@ async fn main() -> io::Result<()> {
     tokio::spawn(async move {
         let mut users: Vec<User> = Vec::new();
         while let Some(raw_message) = rx.recv().await {
+            println!("Sending the response for {:?} : {:?}", raw_message.from, raw_message.content);
             users = handle_message(&s, users, raw_message).await.unwrap();
         }
     });
 
 
+    println!("waiting for messages");
     let mut buf = [0; 1024];
     loop {
         let (read_bytes, remote_addr) = r.recv_from(&mut buf).await?;
-        println!("{:?} bytes recieved from {:?}", read_bytes, remote_addr);
         let raw_messge = RawMessage::new(remote_addr, buf, read_bytes);
         tx.send(raw_messge).await.unwrap();
     }
@@ -134,11 +135,11 @@ enum MessageType {
 }
 
 impl MessageType {
-    fn new(message: RawMessage, users: &mut Vec<User>) -> Self {
-        let msg_type = match message.content.first() {
-            Some(t) => t,
-            None => return MessageType::Unknown,
-        };
+    fn new(mut message: RawMessage, users: &mut Vec<User>) -> Self {
+        if message.content.is_empty() {
+            return MessageType::Unknown;
+        }
+        let msg_type = message.content.remove(0);
         match msg_type {
             1u8 => {
                 return MessageType::Login(
@@ -217,8 +218,8 @@ async fn handle_message(socket: &UdpSocket, mut users: Vec<User>, raw_messge: Ra
 
             let mut new_user = User::new(from_user.addr, from_user.id, from_user.name.unwrap());
             new_user.color = new_color;
-            users[from_user.id] = new_user;
             println!("user set color to {}", new_color.unwrap());
+            users[from_user.id] = new_user;
             return Ok(users);
         }
         MessageType::Text(from_user, message) => {
