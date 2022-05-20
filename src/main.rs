@@ -4,7 +4,7 @@ use tokio::{net::UdpSocket, sync::mpsc};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let connection_uri = "127.0.0.1:7878";
+    let connection_uri = "0.0.0.0:7878";
     let socket = UdpSocket::bind(connection_uri).await?;
     let r = Arc::new(socket);
     let s = r.clone();
