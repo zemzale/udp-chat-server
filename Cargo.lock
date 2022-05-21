@@ -36,13 +36,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inter"
-version = "0.1.0"
-dependencies = [
- "tokio",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -228,6 +221,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "udp-server"
+version = "0.1.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]
